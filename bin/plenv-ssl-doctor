@@ -1,0 +1,56 @@
+#!/bin/bash
+
+set -eu
+
+declare PLENV_DEBUG
+if [ -n "$PLENV_DEBUG" ] ; then
+    set -x
+fi
+
+function install-net-ssleay {
+    if perl -MNet::SSLeay -e 1 >/dev/null 2>&1 ; then
+        echo "Already installed Net::SSLeay?"
+        echo "If you want to reinstall Net::SSLeay,"
+        echo "then type \"cpanm --uninstall Net::SSLeay\" for uninstall."
+        return
+    fi
+
+    if ! type cpanm >/dev/null ; then
+        echo "Please install cpanm command"
+        echo "plenv install-cpanm"
+        return
+    fi
+
+    echo "=== install Crypt::OpenSSL::Guess ==="
+    cpanm Crypt::OpenSSL::Guess
+
+    # see: https://blog.akiym.com/entry/2018/12/15/233330
+    RESOLVED_OPENSSL_PREFIX=$( perl -MCrypt::OpenSSL::Guess -e 'print find_openssl_prefix()' )
+    if [ -z "$RESOLVED_OPENSSL_PREFIX" ] ; then
+        echo "failed guess OPENSSL_PREFIX by Crypt::OpenSSL::Guess"
+        return 1
+    fi
+    echo "resolved OPENSSL_PREFIX as $RESOLVED_OPENSSL_PREFIX"
+
+    echo "=== install Net::SSLeay by OPENSSL_PREFIX=$RESOLVED_OPENSSL_PREFIX"
+    OPENSSL_PREFIX="$RESOLVED_OPENSSL_PREFIX" \
+        cpanm Net::SSLeay
+
+    echo "Conguraturation! Net::SSLeay is installed!"
+}
+
+function main {
+    arg=${1:-}
+    shift || true
+    case "$arg" in
+        install-net-ssleay)
+            install-net-ssleay "$@"
+            ;;
+        ""|*)
+            echo "Usage:"
+            echo "  plenv ssl-doctor [install-net-ssleay]"
+            ;;
+    esac
+}
+
+main "$@"
