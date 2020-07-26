@@ -86,7 +86,7 @@ function main {
             ;;
         ""|*)
             echo "Usage:"
-            echo "  plenv ssl-doctor [install-net-ssleay]"
+            echo "  plenv ssl-doctor [install-net-ssleay|install-io-socket-ssl|check-io-socket-ssl]"
             ;;
     esac
 }
