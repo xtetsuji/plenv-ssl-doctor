@@ -39,12 +39,38 @@ function install-net-ssleay {
     echo "Congratulations! Net::SSLeay is installed!"
 }
 
+function install-io-socket-ssl {
+    if perl -MIO::Socket::SSL -e 1 >/dev/null 2>&1 ; then
+        # 浮動小数点比較で大丈夫かな？
+        if ! perl -MIO::Socket::SSL -e 'my $v = $IO::Socket::SSL::VERSION if ( $v < 1.42 ) { die "IO::Socket::SSL version is too old ($v)"; }' ; then
+            return 1
+        else
+            echo "Already installed IO::Socket::SSL?"
+            echo "If you want to reinstall IO::Socket::SSL,"
+            echo "then type \"cpanm --uninstall IO::Socket::SSL\" for uninstall."
+            return
+        fi
+    fi
+
+    if ! type cpanm >/dev/null ; then
+        echo "Please install cpanm command"
+        echo "plenv install-cpanm"
+        return
+    fi
+
+    echo "=== install IO::Socket::SSL ==="
+    cpanm IO::Socket::SSL
+}
+
 function main {
     arg=${1:-}
     shift || true
     case "$arg" in
         install-net-ssleay)
             install-net-ssleay "$@"
+            ;;
+        install-io-socket-ssl)
+            install-io-socket-ssl "$@"
             ;;
         ""|*)
             echo "Usage:"
