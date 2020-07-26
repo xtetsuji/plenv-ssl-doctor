@@ -62,6 +62,15 @@ function install-io-socket-ssl {
     cpanm IO::Socket::SSL
 }
 
+function check-io-socket-ssl {
+    if perl -MIO::Socket::SSL -e 1 >/dev/null 2>&1 ; then
+        perl -MIO::Socket::SSL -le 'print $IO::Socket::SSL::VERSION'
+    else
+        echo "It seems that IO::Socket::SSL is not instaleld"
+        return 1
+    fi
+}
+
 function main {
     arg=${1:-}
     shift || true
@@ -71,6 +80,9 @@ function main {
             ;;
         install-io-socket-ssl)
             install-io-socket-ssl "$@"
+            ;;
+        check-io-socket-ssl)
+            check-io-socket-ssl "$@"
             ;;
         ""|*)
             echo "Usage:"
