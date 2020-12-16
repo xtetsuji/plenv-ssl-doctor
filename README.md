@@ -26,6 +26,14 @@ git clone git@github.com:xtetsuji/plenv-ssl-doctor.git $PLENV_ROOT/plugins/plenv
 
 Install `Net::SSLeay` by some methods.
 
+### plenv ssl-doctor install-io-socket-ssl
+
+Install `IO::Socket::SSL` by some methods.
+
+### plenv ssl-doctor check-io-socket-ssl
+
+Check `IO::Socket::SSL` installation status.
+
 ## Author
 
 OGATA Tetsuji <tetsuji.ogata@gmail.com>
