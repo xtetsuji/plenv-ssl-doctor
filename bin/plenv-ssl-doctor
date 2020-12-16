@@ -21,7 +21,7 @@ function install-net-ssleay {
         return
     fi
 
-    echo "=== install Crypt::OpenSSL::Guess"
+    echo "=== install Crypt::OpenSSL::Guess ==="
     cpanm Crypt::OpenSSL::Guess
 
     # see: https://blog.akiym.com/entry/2018/12/15/233330
@@ -32,7 +32,7 @@ function install-net-ssleay {
     fi
     echo "resolved OPENSSL_PREFIX as $RESOLVED_OPENSSL_PREFIX"
 
-    echo "=== install Net::SSLeay by OPENSSL_PREFIX=$RESOLVED_OPENSSL_PREFIX"
+    echo "=== install Net::SSLeay by OPENSSL_PREFIX=$RESOLVED_OPENSSL_PREFIX ==="
     OPENSSL_PREFIX="$RESOLVED_OPENSSL_PREFIX" \
         cpanm Net::SSLeay
 
