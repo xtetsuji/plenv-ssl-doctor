@@ -2,39 +2,121 @@
 
 set -eu
 
-declare PLENV_DEBUG
 if [ -n "${PLENV_DEBUG:-}" ] ; then
     set -x
 fi
 
+function select-perl {
+    local version
+    if ! SELECTED_PERL=$(perl -e 'print $^X') ; then
+        echo "Cannot discover the selected Perl. Check PATH and plenv version/which perl." >&2
+        return 1
+    fi
+    if [[ "$SELECTED_PERL" != /* || ! -x "$SELECTED_PERL" ]] ; then
+        echo "Selected Perl must be an executable absolute path. Check plenv which perl." >&2
+        return 1
+    fi
+    if ! version=$("$SELECTED_PERL" -e 'printf "%vd", $^V') || [ -z "$version" ] ; then
+        echo "Cannot query the selected Perl version. Check plenv which perl." >&2
+        return 1
+    fi
+    echo "Selected Perl: $SELECTED_PERL (version $version)" >&2
+}
+
+function select-cpanm {
+    local shebang interpreter
+    if ! SELECTED_CPANM=$(command -v cpanm) ; then
+        echo "Please install cpanm command for the selected Perl: plenv install-cpanm" >&2
+        return 1
+    fi
+    # A plenv shim is a shell dispatcher, not the cpanm Perl script.
+    if [[ "$SELECTED_CPANM" == */shims/cpanm ]] ; then
+        if ! SELECTED_CPANM=$(plenv which cpanm) ; then
+            echo "Cannot resolve the cpanm shim. Run plenv install-cpanm for the selected Perl." >&2
+            return 1
+        fi
+    fi
+    if [[ "$SELECTED_CPANM" != /* || ! -f "$SELECTED_CPANM" || ! -r "$SELECTED_CPANM" ]] ; then
+        echo "Cannot read an absolute cpanm script path. Check command -v cpanm and plenv which cpanm." >&2
+        return 1
+    fi
+    if ! IFS= read -r shebang < "$SELECTED_CPANM" ; then
+        echo "Cannot read the cpanm interpreter. Run plenv install-cpanm for the selected Perl." >&2
+        return 1
+    fi
+    case "$shebang" in
+        '#!/usr/bin/env perl') ;;
+        '#!'/*)
+            interpreter=${shebang#\#!}
+            if [[ "$interpreter" == *[[:space:]]* || ! "$interpreter" -ef "$SELECTED_PERL" ]] ; then
+                echo "Perl/cpanm mismatch: cpanm does not name the selected Perl." >&2
+                echo "Check plenv version, plenv which perl and plenv which cpanm; run plenv install-cpanm for this Perl." >&2
+                return 1
+            fi
+            ;;
+        *)
+            echo "Cannot verify cpanm as a Perl script. Run plenv install-cpanm for the selected Perl." >&2
+            return 1
+            ;;
+    esac
+    echo "Selected cpanm: $SELECTED_CPANM (run with selected Perl)" >&2
+}
+
+function run-cpanm {
+    local status
+    # Pin the interpreter even for an env shebang; never execute a plenv shim.
+    if "$SELECTED_PERL" "$SELECTED_CPANM" "$@" ; then
+        return 0
+    else
+        status=$?
+    fi
+    echo "cpanm failed for $1 (exit $status)." >&2
+    build-log-hint
+    return "$status"
+}
+
+function build-log-hint {
+    echo "Review the build.log path printed by cpanm" >&2
+    # Print the expression literally to avoid disclosing environment values.
+    # shellcheck disable=SC2016
+    echo 'or inspect work directories under ${PERL_CPANM_HOME:-$HOME/.cpanm}/work/.' >&2
+}
+
 function install-net-ssleay {
-    if perl -MNet::SSLeay -e 1 >/dev/null 2>&1 ; then
+    if "$SELECTED_PERL" -MNet::SSLeay -e 1 >/dev/null 2>&1 ; then
         echo "Already installed Net::SSLeay?"
         echo "If you want to reinstall Net::SSLeay,"
         echo "then type \"cpanm --uninstall Net::SSLeay\" for uninstall."
         return
     fi
 
-    if ! type cpanm >/dev/null ; then
-        echo "Please install cpanm command"
-        echo "plenv install-cpanm"
-        return
-    fi
+    select-cpanm || return $?
 
     echo "=== install Crypt::OpenSSL::Guess ==="
-    cpanm Crypt::OpenSSL::Guess
+    run-cpanm Crypt::OpenSSL::Guess || return $?
 
     # see: https://blog.akiym.com/entry/2018/12/15/233330
-    RESOLVED_OPENSSL_PREFIX=$( perl -MCrypt::OpenSSL::Guess -e 'print find_openssl_prefix()' )
-    if [ -z "$RESOLVED_OPENSSL_PREFIX" ] ; then
-        echo "failed guess OPENSSL_PREFIX by Crypt::OpenSSL::Guess"
+    if ! RESOLVED_OPENSSL_PREFIX=$( "$SELECTED_PERL" -MCrypt::OpenSSL::Guess -e 'print find_openssl_prefix()' ) ; then
+        echo "Cannot query Crypt::OpenSSL::Guess with the selected Perl. Check its load error above and cpanm build.log." >&2
+        build-log-hint
+        return 1
+    fi
+    if [[ "$RESOLVED_OPENSSL_PREFIX" != /* || "$RESOLVED_OPENSSL_PREFIX" == *$'\n'* || "$RESOLVED_OPENSSL_PREFIX" == *$'\r'* || ! -d "$RESOLVED_OPENSSL_PREFIX" ]] ; then
+        echo "Crypt::OpenSSL::Guess returned an empty or invalid OPENSSL_PREFIX; expected an existing absolute directory." >&2
+        echo "Check your OpenSSL installation and rerun discovery with the selected Perl." >&2
         return 1
     fi
     echo "resolved OPENSSL_PREFIX as $RESOLVED_OPENSSL_PREFIX"
 
     echo "=== install Net::SSLeay by OPENSSL_PREFIX=$RESOLVED_OPENSSL_PREFIX ==="
     OPENSSL_PREFIX="$RESOLVED_OPENSSL_PREFIX" \
-        cpanm Net::SSLeay
+        run-cpanm Net::SSLeay || return $?
+
+    if ! "$SELECTED_PERL" -MNet::SSLeay -e 1 ; then
+        echo "Net::SSLeay installation could not be verified with the selected Perl. Inspect cpanm build.log and the load error above." >&2
+        build-log-hint
+        return 1
+    fi
 
     echo "Congratulations! Net::SSLeay is installed!"
 }
@@ -42,7 +124,7 @@ function install-net-ssleay {
 function io-socket-ssl-status {
     # Exit 2 only when the module itself is missing; other failures must not
     # fall through to installation. VERSION handles Perl version formats.
-    perl <<'PERL'
+    "$SELECTED_PERL" <<'PERL'
 use strict;
 use warnings;
 unless (eval { require IO::Socket::SSL; 1 }) {
@@ -74,23 +156,24 @@ function install-io-socket-ssl {
         return 1
     fi
 
-    if ! type cpanm >/dev/null 2>&1 ; then
-        echo "Please install cpanm command" >&2
-        echo "plenv install-cpanm" >&2
-        return 1
-    fi
+    select-cpanm || return $?
 
     echo "=== install IO::Socket::SSL ==="
-    cpanm IO::Socket::SSL || return $?
+    run-cpanm IO::Socket::SSL || return $?
     if ! io-socket-ssl-status ; then
-        echo "IO::Socket::SSL installation could not be verified." >&2
+        echo "IO::Socket::SSL installation could not be verified. Inspect cpanm build.log and the load error above." >&2
+        build-log-hint
         return 1
     fi
 }
 
 function check-io-socket-ssl {
-    if perl -MIO::Socket::SSL -e 1 >/dev/null 2>&1 ; then
-        perl -MIO::Socket::SSL -le 'print $IO::Socket::SSL::VERSION'
+    if "$SELECTED_PERL" -MIO::Socket::SSL -e 1 >/dev/null 2>&1 ; then
+        # shellcheck disable=SC2016
+        if ! "$SELECTED_PERL" -MIO::Socket::SSL -le 'print $IO::Socket::SSL::VERSION' ; then
+            echo "Cannot query IO::Socket::SSL version with the selected Perl." >&2
+            return 1
+        fi
     else
         echo "It seems that IO::Socket::SSL is not installed" >&2
         return 1
@@ -102,12 +185,15 @@ function main {
     shift || true
     case "$arg" in
         install-net-ssleay)
+            select-perl || return $?
             install-net-ssleay "$@"
             ;;
         install-io-socket-ssl)
+            select-perl || return $?
             install-io-socket-ssl "$@"
             ;;
         check-io-socket-ssl)
+            select-perl || return $?
             check-io-socket-ssl "$@"
             ;;
         ""|*)
