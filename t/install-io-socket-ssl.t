@@ -36,19 +36,25 @@ use warnings;
 PERL
     write_file("$dir/bin/perl", <<'SH');
 #!/bin/sh
+if [ "$1" = '-e' ] && [ "$2" = 'print $^X' ]; then
+    printf '%s' "$DOCTOR_TEST_SELECTED"
+    exit 0
+fi
 exec "$DOCTOR_TEST_PERL" -I"$DOCTOR_TEST_LIB" -MDoctorTestIsolation "$@"
 SH
     chmod 0755, "$dir/bin/perl" or die $!;
     unless ($args{no_cpanm}) {
         write_file("$dir/bin/cpanm", <<'SH');
-#!/bin/sh
-printf '%s\n' "$*" >> "$DOCTOR_TEST_LOG"
-if [ "$DOCTOR_TEST_CPANM_STATUS" -ne 0 ]; then
-    exit "$DOCTOR_TEST_CPANM_STATUS"
-fi
-if [ -n "$DOCTOR_TEST_INSTALL_SOURCE" ]; then
-    printf '%s\n' "$DOCTOR_TEST_INSTALL_SOURCE" > "$DOCTOR_TEST_LIB/IO/Socket/SSL.pm"
-fi
+#!/usr/bin/env perl
+open my $log, '>>', $ENV{DOCTOR_TEST_LOG} or die $!;
+print {$log} "@ARGV\n";
+close $log or die $!;
+exit $ENV{DOCTOR_TEST_CPANM_STATUS} if $ENV{DOCTOR_TEST_CPANM_STATUS};
+if (length $ENV{DOCTOR_TEST_INSTALL_SOURCE}) {
+    open my $module, '>', "$ENV{DOCTOR_TEST_LIB}/IO/Socket/SSL.pm" or die $!;
+    print {$module} $ENV{DOCTOR_TEST_INSTALL_SOURCE};
+    close $module or die $!;
+}
 SH
         chmod 0755, "$dir/bin/cpanm" or die $!;
     }
@@ -57,6 +63,7 @@ SH
     delete @ENV{qw(PERL5OPT PERL5LIB PERLLIB PLENV_DEBUG BASH_ENV ENV)};
     $ENV{PATH} = "$dir/bin";
     $ENV{DOCTOR_TEST_PERL} = $^X;
+    $ENV{DOCTOR_TEST_SELECTED} = "$dir/bin/perl";
     $ENV{DOCTOR_TEST_LIB} = "$dir/lib";
     $ENV{DOCTOR_TEST_LOG} = "$dir/cpanm.log";
     $ENV{DOCTOR_TEST_CPANM_STATUS} = $args{cpanm_status} || 0;
@@ -92,7 +99,8 @@ for my $version ('1.42', '2.099', 'v2.0.0') {
         my ($status, $out, $err, $calls) = run_case(module => module_source($version));
         is $status, 0, 'succeeds';
         like $out, qr/already installed/, 'existing installation reported';
-        is $err, '', 'no errors';
+        like $err, qr/Selected Perl: .*version/, 'selected Perl reported';
+        unlike $err, qr/Failed|Cannot|not installed/, 'no errors';
         is $calls, '', 'installer not invoked';
     };
 }
