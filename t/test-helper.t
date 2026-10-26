@@ -36,6 +36,27 @@ SH
         'mock executable records literal arguments without installing anything';
 };
 
+subtest 'discovered Perl retains fixture isolation' => sub {
+    my $fixture = DoctorTest->new;
+    $fixture->module('DoctorFixture', 'package DoctorFixture; our $VALUE = "isolated"; 1;');
+    my $discovery = $fixture->run(
+        command => ['/bin/bash', '-c', q{perl -e 'print $^X'}],
+    );
+    is $discovery->{status}, 0, 'interpreter discovery succeeds';
+    is $discovery->{stdout}, $fixture->path('bin/perl'),
+        'discovery returns the absolute fixture wrapper path';
+    my $result = $fixture->run(command => [
+        $discovery->{stdout}, '-MDoctorFixture', '-e', 'print $DoctorFixture::VALUE',
+    ]);
+    is $result->{status}, 0, 'discovered interpreter loads a fixture-only module';
+    is $result->{stdout}, 'isolated', 'fixture module executes through the discovered path';
+    is $result->{stderr}, '', 'fixture load has no errors';
+    $result = $fixture->run(command => [$discovery->{stdout}, '-MFile::Temp', '-e', '1']);
+    isnt $result->{status}, 0, 'host module is inaccessible through the discovered path';
+    like $result->{stderr}, qr/Can't locate File\/Temp\.pm in \@INC/,
+        'host module fails because only fixture modules are visible';
+};
+
 subtest 'capture handles large stderr before stdout and preserves argument boundaries' => sub {
     my $fixture = DoctorTest->new;
     my $literal = 'spaces; $(command) "quotes"';

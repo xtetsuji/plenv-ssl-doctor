@@ -21,6 +21,12 @@ use warnings;
 PERL
     $self->executable('perl', <<'SH');
 #!/bin/sh
+# Keep interpreter discovery on the wrapper so later absolute-path calls
+# cannot bypass the fixture module search path.
+if [ "$#" -eq 2 ] && [ "$1" = '-e' ] && [ "$2" = 'print $^X' ]; then
+    printf '%s' "$0"
+    exit 0
+fi
 exec "$DOCTOR_TEST_PERL" -I"$DOCTOR_TEST_LIB" -MDoctorTestIsolation "$@"
 SH
     return $self;
@@ -138,7 +144,9 @@ DoctorTest - offline fixtures for plenv-ssl-doctor tests
     );
 
 Each fixture has a temporary bin directory as its entire PATH and an isolated
-Perl wrapper that can load only fixture modules. Files are removed at process
+Perl wrapper that can load only fixture modules. The discovery command
+C<perl -e 'print $^X'> returns the wrapper's absolute path so subsequent calls
+through that path retain isolation. Files are removed at process
 exit by File::Temp. write_file, module and executable return absolute paths;
 path and read_file take paths relative to the fixture root. Supply executable
 paths and arguments as a command array, never a shell command string. Child
