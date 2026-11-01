@@ -82,7 +82,129 @@ function build-log-hint {
     echo 'or inspect work directories under ${PERL_CPANM_HOME:-$HOME/.cpanm}/work/.' >&2
 }
 
+# Reusable, read-only discovery API (Bash 3.2 indexed arrays).
+# Requires SELECTED_PERL from select-perl. OPENSSL_CANDIDATE_COUNT records
+# share an index in OPENSSL_{PREFIXES,VERSIONS,SOURCES,REASONS}.
+# discover-openssl-candidates resets records, returns 0 with candidates, 1
+# without candidates, or 2 for an invalid explicit override. Diagnostics use
+# stderr; stdout is reserved for command output. No installer runs here.
+function add-openssl-candidate {
+    local prefix=$1 source=$2 reason=$3 version old library ssl=0 crypto=0
+    if [[ "$prefix" != /* || "$prefix" == *[$'\n\r\t']* || ! -d "$prefix" ]] ; then
+        echo "Rejected $source: empty or invalid OPENSSL_PREFIX; expected an existing absolute directory." >&2
+        return 1
+    fi
+    prefix=$(cd -P -- "$prefix" && pwd -P) || return 1
+    for old in ${OPENSSL_PREFIXES[@]+"${OPENSSL_PREFIXES[@]}"} ; do
+        [ "$old" != "$prefix" ] || return 0
+    done
+    if [ ! -x "$prefix/bin/openssl" ] || ! version=$("$prefix/bin/openssl" version 2>/dev/null) ; then
+        echo "Rejected $source prefix '$prefix': bin/openssl version failed." >&2
+        return 1
+    fi
+    if [[ "$version" == *[$'\n\r\t']* || ! "$version" =~ ^OpenSSL[[:space:]]+[0-9]+\.[0-9]+\.[0-9]+[^[:space:]]*([[:space:]].*)?$ ]] ; then
+        echo "Rejected $source prefix '$prefix': malformed OpenSSL version output." >&2
+        return 1
+    fi
+    if [ ! -f "$prefix/include/openssl/ssl.h" ] || [ ! -r "$prefix/include/openssl/ssl.h" ] ; then
+        echo "Rejected $source prefix '$prefix': missing readable include/openssl/ssl.h." >&2
+        return 1
+    fi
+    # Accept conventional Unix shared/static libraries, including versioned ELF
+    # sonames and lib64 layouts. Existence alone (or a dangling link) is insufficient.
+    for library in "$prefix"/lib/libssl.{a,dylib,so,so.*} "$prefix"/lib64/libssl.{a,dylib,so,so.*} ; do
+        if [ -f "$library" ] && [ -r "$library" ] && [ -s "$library" ] ; then ssl=1; fi
+    done
+    for library in "$prefix"/lib/libcrypto.{a,dylib,so,so.*} "$prefix"/lib64/libcrypto.{a,dylib,so,so.*} ; do
+        if [ -f "$library" ] && [ -r "$library" ] && [ -s "$library" ] ; then crypto=1; fi
+    done
+    if [ "$ssl" -ne 1 ] || [ "$crypto" -ne 1 ] ; then
+        echo "Rejected $source prefix '$prefix': missing readable, nonempty ssl and crypto libraries in lib or lib64." >&2
+        return 1
+    fi
+    OPENSSL_PREFIXES+=("$prefix")
+    OPENSSL_VERSIONS+=("$version")
+    OPENSSL_SOURCES+=("$source")
+    OPENSSL_REASONS+=("$reason")
+    OPENSSL_CANDIDATE_COUNT=$((OPENSSL_CANDIDATE_COUNT + 1))
+}
+
+function discover-openssl-candidates {
+    local prefix formula
+    OPENSSL_CANDIDATE_COUNT=0
+    RESOLVED_OPENSSL_PREFIX='' SELECTED_OPENSSL_VERSION=''
+    SELECTED_OPENSSL_SOURCE='' SELECTED_OPENSSL_REASON='' SELECTED_OPENSSL_INDEX=''
+    OPENSSL_PREFIXES=() OPENSSL_VERSIONS=() OPENSSL_SOURCES=() OPENSSL_REASONS=()
+    if [ "${CLI_OPENSSL_PREFIX_SET:-0}" -eq 1 ] ; then
+        add-openssl-candidate "$CLI_OPENSSL_PREFIX" cli 'explicit --openssl-prefix' || return 2
+    elif [ "${OPENSSL_PREFIX+x}" = x ] ; then
+        add-openssl-candidate "$OPENSSL_PREFIX" environment 'explicit OPENSSL_PREFIX' || return 2
+    else
+        if command -v brew >/dev/null 2>&1 ; then
+            for formula in openssl@3 openssl ; do
+                if prefix=$(brew --prefix "$formula" 2>/dev/null) && [ -n "$prefix" ] ; then
+                    add-openssl-candidate "$prefix" "homebrew:$formula" 'first valid automatic candidate in discovery order' || :
+                fi
+            done
+        fi
+        # Query only an already available module: future offline check callers
+        # can reuse discovery without cpanm, downloads, or module installation.
+        if "$SELECTED_PERL" -MCrypt::OpenSSL::Guess -e 1 >/dev/null 2>&1 ; then
+            if prefix=$("$SELECTED_PERL" -MCrypt::OpenSSL::Guess -e 'print find_openssl_prefix()' 2>/dev/null) ; then
+                add-openssl-candidate "$prefix" guess 'first valid automatic candidate in discovery order' || :
+            else
+                echo "Cannot query Crypt::OpenSSL::Guess with the selected Perl." >&2
+            fi
+        fi
+    fi
+    [ "${OPENSSL_CANDIDATE_COUNT:-0}" -gt 0 ]
+}
+
+# select-openssl-candidate returns 0 with selected fields, 1 without records.
+# Compatibility-policy extension point: inspect all candidate records here,
+# preserve explicit selections, and set the selected index/reason. Discovery
+# deliberately makes no assertion about Net::SSLeay/OpenSSL compatibility.
+function select-openssl-candidate {
+    [ "${OPENSSL_CANDIDATE_COUNT:-0}" -gt 0 ] || return 1
+    SELECTED_OPENSSL_INDEX=0
+    RESOLVED_OPENSSL_PREFIX=${OPENSSL_PREFIXES[$SELECTED_OPENSSL_INDEX]}
+    SELECTED_OPENSSL_VERSION=${OPENSSL_VERSIONS[$SELECTED_OPENSSL_INDEX]}
+    SELECTED_OPENSSL_SOURCE=${OPENSSL_SOURCES[$SELECTED_OPENSSL_INDEX]}
+    SELECTED_OPENSSL_REASON=${OPENSSL_REASONS[$SELECTED_OPENSSL_INDEX]}
+}
+
+function prepare-openssl-selection {
+    local status
+    if discover-openssl-candidates ; then
+        :
+    else
+        status=$?
+        [ "$status" -ne 2 ] || return 2
+        # Installation-only prerequisite setup. Valid explicit/Homebrew results
+        # and an existing Guess module never require installing Guess.
+        if ! "$SELECTED_PERL" -MCrypt::OpenSSL::Guess -e 1 >/dev/null 2>&1 ; then
+            echo "=== install Crypt::OpenSSL::Guess ==="
+            run-cpanm Crypt::OpenSSL::Guess || return $?
+            discover-openssl-candidates || {
+                echo "No valid OpenSSL candidate found after installing Crypt::OpenSSL::Guess." >&2
+                return 1
+            }
+        else
+            echo "No valid OpenSSL candidate found. Install OpenSSL development files or use --openssl-prefix PATH." >&2
+            return 1
+        fi
+    fi
+    select-openssl-candidate || return $?
+    echo "Selected OpenSSL: $RESOLVED_OPENSSL_PREFIX" >&2
+    echo "OpenSSL version: $SELECTED_OPENSSL_VERSION" >&2
+    echo "OpenSSL source: $SELECTED_OPENSSL_SOURCE; reason: $SELECTED_OPENSSL_REASON" >&2
+}
+
 function install-net-ssleay {
+    # Explicit input errors remain errors even if the module is already present.
+    if [ "${CLI_OPENSSL_PREFIX_SET:-0}" -eq 1 ] || [ "${OPENSSL_PREFIX+x}" = x ] ; then
+        discover-openssl-candidates || return $?
+    fi
     if "$SELECTED_PERL" -MNet::SSLeay -e 1 >/dev/null 2>&1 ; then
         echo "Already installed Net::SSLeay?"
         echo "If you want to reinstall Net::SSLeay,"
@@ -92,21 +214,7 @@ function install-net-ssleay {
 
     select-cpanm || return $?
 
-    echo "=== install Crypt::OpenSSL::Guess ==="
-    run-cpanm Crypt::OpenSSL::Guess || return $?
-
-    # see: https://blog.akiym.com/entry/2018/12/15/233330
-    if ! RESOLVED_OPENSSL_PREFIX=$( "$SELECTED_PERL" -MCrypt::OpenSSL::Guess -e 'print find_openssl_prefix()' ) ; then
-        echo "Cannot query Crypt::OpenSSL::Guess with the selected Perl. Check its load error above and cpanm build.log." >&2
-        build-log-hint
-        return 1
-    fi
-    if [[ "$RESOLVED_OPENSSL_PREFIX" != /* || "$RESOLVED_OPENSSL_PREFIX" == *$'\n'* || "$RESOLVED_OPENSSL_PREFIX" == *$'\r'* || ! -d "$RESOLVED_OPENSSL_PREFIX" ]] ; then
-        echo "Crypt::OpenSSL::Guess returned an empty or invalid OPENSSL_PREFIX; expected an existing absolute directory." >&2
-        echo "Check your OpenSSL installation and rerun discovery with the selected Perl." >&2
-        return 1
-    fi
-    echo "resolved OPENSSL_PREFIX as $RESOLVED_OPENSSL_PREFIX"
+    prepare-openssl-selection || return $?
 
     echo "=== install Net::SSLeay by OPENSSL_PREFIX=$RESOLVED_OPENSSL_PREFIX ==="
     OPENSSL_PREFIX="$RESOLVED_OPENSSL_PREFIX" \
@@ -181,8 +289,35 @@ function check-io-socket-ssl {
 }
 
 function main {
-    arg=${1:-}
-    shift || true
+    local arg='' option_seen=0
+    CLI_OPENSSL_PREFIX_SET=0
+    # Options may precede or follow the command; exactly one value is consumed.
+    # Empty overrides are errors, and repeated options use the last value.
+    while [ "$#" -gt 0 ] ; do
+        case "$1" in
+            --openssl-prefix)
+                if [ "$#" -lt 2 ] || [[ "$2" == --* ]] || [ -z "$2" ] ; then
+                    echo "--openssl-prefix requires a nonempty PATH argument." >&2
+                    return 2
+                fi
+                CLI_OPENSSL_PREFIX=$2 CLI_OPENSSL_PREFIX_SET=1 option_seen=1
+                shift 2
+                ;;
+            --*) echo "Unknown option: $1" >&2; return 2 ;;
+            *)
+                if [ -n "$arg" ] ; then
+                    echo "Unexpected argument: $1" >&2
+                    return 2
+                fi
+                arg=$1
+                shift
+                ;;
+        esac
+    done
+    if [ "$option_seen" -eq 1 ] && [ "$arg" != install-net-ssleay ] ; then
+        echo "--openssl-prefix is supported only with install-net-ssleay." >&2
+        return 2
+    fi
     case "$arg" in
         install-net-ssleay)
             select-perl || return $?
@@ -198,9 +333,11 @@ function main {
             ;;
         ""|*)
             echo "Usage:"
-            echo "  plenv ssl-doctor [install-net-ssleay|install-io-socket-ssl|check-io-socket-ssl]"
+            echo "  plenv ssl-doctor [install-net-ssleay|install-io-socket-ssl|check-io-socket-ssl] [--openssl-prefix PATH]"
             ;;
     esac
 }
 
-main "$@"
+if [ "${BASH_SOURCE[0]}" = "$0" ] ; then
+    main "$@"
+fi
