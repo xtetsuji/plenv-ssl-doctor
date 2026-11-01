@@ -20,7 +20,12 @@ sub run_case {
     my (%args) = @_;
     my $dir = tempdir(CLEANUP => 1);
     make_path("$dir/bin", "$dir/lib/Net", "$dir/lib/IO/Socket",
-        "$dir/lib/Crypt/OpenSSL", "$dir/openssl prefix", "$dir/shims");
+        "$dir/lib/Crypt/OpenSSL", "$dir/openssl prefix/bin", "$dir/openssl prefix/include/openssl",
+        "$dir/openssl prefix/lib", "$dir/shims");
+    write_file("$dir/openssl prefix/bin/openssl", "#!/bin/sh\nprintf 'OpenSSL 3.0.0 fixture\\n'\n", 0755);
+    write_file("$dir/openssl prefix/include/openssl/ssl.h", "/* fixture */\n");
+    write_file("$dir/openssl prefix/lib/libssl.a", "fixture\n");
+    write_file("$dir/openssl prefix/lib/libcrypto.a", "fixture\n");
     write_file("$dir/lib/Isolation.pm", <<'PERL');
 use strict;
 use warnings;
@@ -50,6 +55,9 @@ if [ "$1" = '-e' ]; then
             [ "$TEST_VERSION_FAIL" = 1 ] && exit 9 ;;
     esac
 fi
+if [ "$1" = '-MCrypt::OpenSSL::Guess' ] && [ "$3" = 1 ] && [ ! -f "$TEST_LIB/guess-installed" ]; then
+    exit 2
+fi
 exec "$TEST_REAL_PERL" -I"$TEST_LIB" -MIsolation "$@"
 SH
     my $cpanm = "$dir/bin/cpanm";
@@ -59,6 +67,10 @@ open my $log, '>>', $ENV{TEST_CPANM_LOG} or die $!;
 print {$log} "$ARGV[0]|", ($ENV{OPENSSL_PREFIX} || ''), "\n";
 close $log or die $!;
 exit 7 if $ARGV[0] eq $ENV{TEST_FAIL_MODULE};
+if ($ARGV[0] eq 'Crypt::OpenSSL::Guess') {
+    open my $marker, '>', "$ENV{TEST_LIB}/guess-installed" or die $!;
+    close $marker or die $!;
+}
 if ($ARGV[0] eq 'Net::SSLeay' && !$ENV{TEST_NO_MODULE}) {
     open my $mod, '>', "$ENV{TEST_LIB}/Net/SSLeay.pm" or die $!;
     print {$mod} $ENV{TEST_BROKEN_MODULE} ? 'die "broken XS load\n";' : 'package Net::SSLeay; 1;';
@@ -76,7 +88,7 @@ printf '%s' "$TEST_CPANM"
 SH
     }
     local %ENV = %ENV;
-    delete @ENV{qw(PERL5OPT PERL5LIB PERLLIB PLENV_DEBUG BASH_ENV ENV)};
+    delete @ENV{qw(OPENSSL_PREFIX PERL5OPT PERL5LIB PERLLIB PLENV_DEBUG BASH_ENV ENV)};
     @ENV{qw(TEST_REAL_PERL TEST_SELECTED TEST_LIB TEST_PERL_LOG TEST_CPANM_LOG TEST_CPANM)} =
         ($^X, "$dir/bin/perl", "$dir/lib", "$dir/perl.log", "$dir/cpanm.log", $cpanm);
     $ENV{PATH} = ($args{shim} ? "$dir/shims:" : '') . "$dir/bin";
