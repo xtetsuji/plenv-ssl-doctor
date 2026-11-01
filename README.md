@@ -6,8 +6,9 @@ Perl's TLS modules in the currently selected Perl environment.
 ## Prerequisites and installation
 
 - A Unix-like environment with Bash at `/bin/bash` and Git.
-- plenv installed and initialized, with a working Perl selected. Commands use
-  `perl` and `cpanm` from `PATH`; verify the intended environment before installing.
+- plenv installed and initialized, with a working Perl selected. The plugin
+  discovers the selected Perl from `PATH` and pins its absolute interpreter path
+  for subsequent checks and installs; verify the intended environment first.
 - `cpanm` for installation commands. If missing, use `plenv install-cpanm` with
   your selected Perl.
 - For building Net::SSLeay: a C compiler, make, and OpenSSL development headers
@@ -34,6 +35,7 @@ plenv version
 plenv which perl
 perl -e 'print "$^X\n$^V\n"'
 command -v cpanm
+plenv which cpanm
 ```
 
 ## Commands and exit status
@@ -52,6 +54,31 @@ is not evidence that a diagnostic succeeded.
 To inspect a command's exit status, run `echo "$?"` immediately after it, before
 running another command.
 
+### Selected Perl and installer
+
+Each recognized command discovers Perl using `perl -e 'print $^X'`, requires an
+executable absolute path, and queries its version. It prints the selected path
+and version to stderr, then uses that absolute interpreter for module checks,
+Guess queries, and installer invocations. Failed discovery or version queries
+exit **1**.
+
+When installation is needed, the plugin locates cpanm using `command -v cpanm`.
+A path ending in `/shims/cpanm` is resolved using `plenv which cpanm`; the shim
+itself is not executed as the installer. The resolved script must be an
+absolute, readable regular file. Supported first-line shebangs are:
+
+- Exactly `#!/usr/bin/env perl` (the plugin still runs the selected absolute Perl).
+- An absolute interpreter path without arguments that refers to the same file
+  as the selected Perl, including a symlink to it.
+
+The plugin invokes the installer as `selected-perl /absolute/path/to/cpanm ...`.
+It conservatively rejects shell wrappers, other unverifiable shebangs, shebang
+arguments (including `env -S`), and scripts naming a different Perl. Such a
+rejection exits **1** before installation; it does not prove the wrapper could
+never work. Check `plenv version`, `plenv which perl`, and `plenv which cpanm`,
+and run `plenv install-cpanm` for the selected Perl to obtain a supported script.
+An already usable module does not require cpanm.
+
 ### Install Net::SSLeay
 
 ```sh
@@ -61,31 +88,40 @@ plenv ssl-doctor install-net-ssleay
 If Net::SSLeay loads, report the existing installation and exit **0**, without
 checking its version or reinstalling it. Otherwise the command:
 
-1. Checks for `cpanm`.
+1. Selects and validates cpanm as described above.
 2. Runs `cpanm Crypt::OpenSSL::Guess`.
 3. Calls `Crypt::OpenSSL::Guess::find_openssl_prefix()` and prints the result.
-4. Sets `OPENSSL_PREFIX` to that resolved result for `cpanm Net::SSLeay`.
+4. Requires the resolved prefix to be an existing absolute directory without
+   newline or carriage-return characters.
+5. Sets `OPENSSL_PREFIX` to that result for the selected Perl running cpanm
+   with `Net::SSLeay`.
+6. Checks that the selected Perl can load Net::SSLeay before reporting success.
 
 The current command does not provide a reliable explicit OpenSSL selection
-interface: a caller-supplied `OPENSSL_PREFIX` is not independently validated or
-preserved by the plugin; the value passed to cpanm comes from Guess. Guess's
-behavior can depend on its installed version and environment. Copy/paste
+interface: the plugin validates Guess's returned directory, but does not
+independently select or preserve a caller-supplied `OPENSSL_PREFIX`; the value
+passed to cpanm comes from Guess. Its behavior can depend on the installed
+Guess version and environment. Copy/paste
 override examples are deferred until
 [explicit selection is implemented (#3)](https://github.com/xtetsuji/plenv-ssl-doctor/issues/3).
 
-Known limitations:
+Exit behavior and remaining limitations:
 
 - A missing module and a broken installed module both enter the installation
   path; the initial load error is suppressed.
-- Missing `cpanm` prints advice but currently exits **0**.
-- An empty guessed prefix exits **1**. Failed installers or Guess invocations
-  normally stop the script with the failing command's nonzero status.
-- Installer success exits **0**, but there is no post-install module load check.
-  Verify the result separately:
+- Missing or rejected cpanm exits **1** before any installation.
+- A failed Guess query or an empty/invalid resolved prefix exits **1**.
+- An installer failure preserves its nonzero status and prints build-log hints.
+- After installer success, a missing or unloadable Net::SSLeay exits **1**, with
+  the load error and build-log hints. Only a successful load produces the
+  congratulations message and exits **0**. No minimum Net::SSLeay version or
+  real TLS connection is checked.
 
-  ```sh
-  perl -MNet::SSLeay -e 'print "Net::SSLeay $Net::SSLeay::VERSION\n"'
-  ```
+To inspect the installed module version separately:
+
+```sh
+perl -MNet::SSLeay -e 'print "Net::SSLeay $Net::SSLeay::VERSION\n"'
+```
 
 ### Install IO::Socket::SSL
 
@@ -106,9 +142,11 @@ every application. Use a maintained release appropriate for your application.
   rerun the command. No automatic upgrade occurs.
 - If loading fails (including a missing dependency), report the load error and
   exit **1** without invoking cpanm.
-- Missing `cpanm` exits **1** and recommends `plenv install-cpanm`.
+- Missing or rejected cpanm exits **1** before installation; missing cpanm
+  recommends `plenv install-cpanm`.
 - Installer failure preserves its nonzero status. After installer success, a
   module that fails to load or satisfy 1.42 exits **1**; otherwise exit **0**.
+  Installer and post-install verification failures include build-log hints.
 
 Version checks use Perl's `VERSION` method, including for dotted versions.
 The internal missing-module status 2 selects installation; it is not the public
@@ -122,7 +160,8 @@ plenv ssl-doctor check-io-socket-ssl
 
 Print the installed version and exit **0** when the module loads. A missing or
 unloadable module produces a generic missing-module message and exits **1**;
-the underlying load error is suppressed. This command does **not** check the
+the underlying load error is suppressed. A failure to query the version after
+a successful initial load also exits **1**. This command does **not** check the
 1.42 minimum, make an HTTPS request, or validate certificates.
 
 ## OpenSSL discovery and compatibility
@@ -191,7 +230,10 @@ read that error before repeating installation.
 
 ### Net::SSLeay will not build
 
-Read cpanm's reported build log location. Record the exact distribution version,
+Read cpanm's reported `build.log` location. On installer or post-install load
+failures, the plugin also suggests inspecting work directories under
+`${PERL_CPANM_HOME:-$HOME/.cpanm}/work/`; it does not search or read those logs
+automatically. Record the exact distribution version,
 resolved OpenSSL prefix, compiler error, Perl version, OS and architecture.
 Check that headers and libraries are installed together for the intended
 architecture. Compare the build prefix with shell and runtime versions above
@@ -226,25 +268,48 @@ From the repository root, run:
 
 ```sh
 bash -n bin/plenv-ssl-doctor
+shellcheck bin/plenv-ssl-doctor
 prove -v t
 ```
 
-The current `t/install-io-socket-ssl.t` regression suite uses temporary module
-fixtures, an isolated module search path, and fake executables. It does not
-access the network, install CPAN modules, run real builds, or change your Perl
-installation. It covers missing/current/old/dotted versions, load failures,
-missing cpanm, installer failures, and post-install verification. It does not
-establish compatibility with real OpenSSL libraries or test every subcommand.
+ShellCheck is an additional lint dependency; the Perl regression tests require
+no CPAN installations. To run a focused suite, use for example
+`prove -v t/installation-environment.t`.
 
-Keep user-facing messages and documentation in English. Add offline
-fixture-based coverage for behavior changes; avoid modifying the developer's
-Perl or OpenSSL during tests. Include the command, exit status, exact versions,
-and relevant redacted errors in bug reports.
+The test files use temporary module fixtures and fake executables, with
+isolated module lookup and executable paths. Tests do not access the network,
+install CPAN modules, run real builds, or change your Perl/OpenSSL installation.
+They cover IO::Socket::SSL missing/current/old/dotted versions and load errors,
+Perl/cpanm selection, Guess and installer failures, prefix validation,
+post-install load checks, and test-helper isolation/output capture. They do
+not establish compatibility with real OpenSSL libraries or test every possible
+wrapper or platform.
+
+Use the shared `t/lib/DoctorTest.pm` helper for new fixture-based tests; see its
+embedded usage documentation and `t/test-helper.t`. `DoctorTest->new` creates a
+temporary fixture; `module`, `executable`, and `write_file` populate it. Pass
+`run(command => [executable, argument, ...], env => { ... })` an argument array,
+not a shell command string. Assert both `exit` and `signal` (or raw `status`)
+so signal termination cannot appear successful. The helper isolates PATH and
+Perl module lookup, removes inherited startup hooks, and captures stdout and
+stderr separately. Fake commands must use shell builtins or explicit absolute
+paths; no real installer is supplied. The interpreter-discovery fixture also
+preserves isolation when the script subsequently pins its Perl path.
+
+The [CI workflow](.github/workflows/ci.yml) runs Bash syntax checks, ShellCheck,
+and `prove -v t` on Ubuntu for pull requests, pushes to master, and manual
+workflow runs. The regression tests themselves are offline; CI setup checks
+out the repository and installs ShellCheck using the runner's package manager.
+
+Keep user-facing messages and documentation in English. Add offline coverage
+for behavior changes; avoid modifying the developer's Perl or OpenSSL during
+tests. Include the command, exit status, selected interpreter/installer paths,
+exact versions, and relevant redacted errors in bug reports.
 
 Further documentation will accompany explicit OpenSSL selection (#3),
-compatibility diagnostics (#4), general diagnostics (#5), and expanded testing
-(#6). Those features and their proposed examples are not available in this
-version; this README documents the current implementation.
+compatibility diagnostics (#4), and general diagnostics (#5). Those features
+and their proposed examples are not available in this version; this README
+documents the current implementation.
 
 ## Author
 
