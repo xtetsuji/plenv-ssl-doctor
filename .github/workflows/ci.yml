@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  offline-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ShellCheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes shellcheck
+      - name: Check Bash syntax
+        run: bash -n bin/plenv-ssl-doctor
+      - name: ShellCheck
+        run: shellcheck bin/plenv-ssl-doctor
+      - name: Run offline regression tests
+        run: prove -v t
