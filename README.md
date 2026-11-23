@@ -41,15 +41,20 @@ plenv which cpanm
 ## Commands and exit status
 
 ```text
-plenv ssl-doctor [--openssl-prefix PATH] install-net-ssleay [--openssl-prefix PATH]
+plenv ssl-doctor install-net-ssleay [--openssl-prefix PATH] [--net-ssleay-version VERSION]
 plenv ssl-doctor install-io-socket-ssl
 plenv ssl-doctor check-io-socket-ssl
 ```
 
-The `--openssl-prefix PATH` option is accepted before or after
-`install-net-ssleay` only. If repeated, the last value wins. A missing or empty
-value, a value beginning with `--`, an unknown `--` option, an extra positional
-argument, or use of the option with another command exits **2**. The form
+Both options are accepted before or after `install-net-ssleay` only. If either
+is repeated, its last value wins. `--net-ssleay-version VERSION` accepts an
+exact release in the form digits.digits, optionally followed by an underscore
+and digits (for example `1.96` or `1.97_01`); ranges and `=VERSION` syntax are
+not accepted. A missing or malformed version exits **2**.
+
+A missing or empty prefix value or a value beginning with `--` exits **2**.
+An unknown `--` option, an extra positional argument, or use of either option
+with another command also exits **2**. The form
 `--openssl-prefix=PATH` is not supported. An empty `OPENSSL_PREFIX` is also an
 invalid explicit selection; a CLI value takes precedence over it.
 
@@ -91,8 +96,9 @@ plenv ssl-doctor install-net-ssleay
 ```
 
 An explicit prefix is validated even when Net::SSLeay already loads. If it is
-valid and the module loads, the command reports the existing installation and
-exits **0** without checking its version or reinstalling it. Otherwise, when the
+valid (or absent) and the module loads, the command reports its installed
+version and does not reinstall it. If a requested version differs from that
+reported version, the command exits **1**; otherwise it exits **0**. When the
 module does not load, the command selects cpanm, selects an OpenSSL candidate,
 sets `OPENSSL_PREFIX` for the Net::SSLeay installer, and verifies that the
 selected Perl can load the installed module.
@@ -111,7 +117,10 @@ OPENSSL_PREFIX="$(brew --prefix openssl@3)" plenv ssl-doctor install-net-ssleay
 Automatic discovery considers Homebrew `openssl@3`, then Homebrew `openssl`,
 then the prefix returned by an already available `Crypt::OpenSSL::Guess`, in
 that order. Invalid automatic candidates are skipped. Paths are canonicalized
-and duplicate symlink targets are deduplicated; the first valid candidate wins.
+and duplicate symlink targets are deduplicated. Candidates are ranked by
+compatibility with the requested release: `KNOWN_SUPPORTED`, then `UNKNOWN`,
+then `KNOWN_INCOMPATIBLE`, preserving discovery order within each rank. An
+explicit prefix remains authoritative even if another candidate ranks higher.
 If none is valid and Guess is unavailable, the installation command installs
 Guess via cpanm and retries discovery. If Guess is already available but yields
 no valid candidate, the command fails instead of reinstalling it. A valid
@@ -125,6 +134,41 @@ readable, and both ssl and crypto libraries must be readable, nonempty files in
 The selected canonical prefix, version, source, and selection reason are
 printed to stderr for an installation. Validation establishes availability,
 not compatibility with a particular Net::SSLeay release.
+
+To evaluate and request an exact CPAN release for a new installation, use for
+example:
+
+```sh
+plenv ssl-doctor install-net-ssleay --net-ssleay-version 1.96
+plenv ssl-doctor install-net-ssleay --net-ssleay-version 1.97_01 --openssl-prefix "$(brew --prefix openssl@3)"
+```
+
+The installer requests `Net::SSLeay@VERSION` from cpanm and verifies that the
+selected Perl loads exactly that version afterward. An underscore version also
+passes `--dev` to enable developer-release lookup; the configured cpanm and
+CPAN source must be able to resolve it. A loadable existing module is never
+silently replaced, even if another version was requested.
+
+Without a version option, the target is unknown until cpanm resolves it during
+installation. The plugin makes no metadata query to predict it, reports
+`UNKNOWN`, warns, and attempts the build. An installed module's version
+identifies the current environment, not a future target.
+
+The selected pair's status and reason are reported before the build:
+
+- `KNOWN_SUPPORTED`: the version-scoped rules have evidence of support.
+- `KNOWN_INCOMPATIBLE`: the rules identify an incompatibility; the command exits
+  **1** before building Net::SSLeay, including for an explicit prefix.
+- `UNKNOWN`: no rule establishes either result; the command warns and attempts
+  the build. It does not imply that the pair is incompatible.
+
+See the [compatibility rules and evidence](docs/net-ssleay-compatibility.md),
+including [upstream PR #553](https://github.com/radiator-software/p5-net-ssleay/pull/553)
+and the [OpenSSL versioning policy](https://openssl-library.org/policies/general/versioning-policy/#patch-release).
+For example, the rules distinguish Net::SSLeay 1.96 with OpenSSL 4.0.x from
+1.97_01 with OpenSSL 4.0.x; they do not reject OpenSSL 4 as a whole. Support
+is evidence about a release pair, not a guarantee that a particular compiler,
+architecture, downstream patches, headers, or libraries will build successfully.
 
 Exit behavior and remaining limitations:
 
@@ -188,8 +232,8 @@ a successful initial load also exits **1**. This command does **not** check the
 
 Automatic discovery can use [Crypt::OpenSSL::Guess](https://github.com/akiym/Crypt-OpenSSL-Guess)
 as a fallback. Finding a prefix does not prove that a Net::SSLeay release can
-compile against those headers and libraries. This plugin currently performs no
-compatibility policy check.
+compile against those headers and libraries. The version-scoped compatibility
+rules described above provide evidence, not a guarantee of a successful build.
 
 | Term | Meaning | How to inspect |
 | --- | --- | --- |
@@ -304,8 +348,8 @@ isolated module lookup and executable paths. Tests do not access the network,
 install CPAN modules, run real builds, or change your Perl/OpenSSL installation.
 They cover IO::Socket::SSL missing/current/old/dotted versions and load errors,
 Perl/cpanm selection, explicit and automatic OpenSSL selection, Guess and
-installer failures, prefix validation and deduplication,
-post-install load checks, and test-helper isolation/output capture. They do
+installer failures, prefix validation and deduplication, compatibility ranking
+and version boundaries, post-install load and requested-version checks, and test-helper isolation/output capture. They do
 not establish compatibility with real OpenSSL libraries or test every possible
 wrapper or platform.
 
@@ -330,8 +374,8 @@ for behavior changes; avoid modifying the developer's Perl or OpenSSL during
 tests. Include the command, exit status, selected interpreter/installer paths,
 exact versions, and relevant redacted errors in bug reports.
 
-Compatibility diagnostics (#4) and general diagnostics (#5) are not yet
-implemented; this README documents the current implementation.
+General diagnostics (#5) are not yet implemented; this README documents the
+current implementation.
 
 ## Author
 
