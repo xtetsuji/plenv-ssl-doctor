@@ -391,8 +391,180 @@ function check-io-socket-ssl {
     fi
 }
 
+function diagnose-openssl-builds {
+    local index status
+    if discover-openssl-candidates ; then
+        echo 'OpenSSL candidates available for future builds:'
+        for ((index=0; index<OPENSSL_CANDIDATE_COUNT; index++)) ; do
+            # check has no install target. The loaded module is not a build target.
+            evaluate-net-ssleay-compatibility '' "${OPENSSL_VERSIONS[$index]}"
+            printf '  %s (%s, source: %s)\n' \
+                "${OPENSSL_PREFIXES[$index]}" "${OPENSSL_VERSIONS[$index]}" "${OPENSSL_SOURCES[$index]}"
+            printf '    Compatibility: %s. %s\n' "$COMPATIBILITY_STATUS" "$COMPATIBILITY_REASON"
+        done
+    else
+        status=$?
+        if [ "$status" -eq 2 ] ; then
+            echo 'Error: invalid OPENSSL_PREFIX for future builds.' >&2
+            return 2
+        fi
+        echo 'Warning: no OpenSSL candidates available for future builds.'
+        # Discovery already tried Guess. Explain a missing or broken optional
+        # helper if there were no usable candidates.
+        diagnose-perl-module Crypt::OpenSSL::Guess 0 || :
+    fi
+}
+
+function diagnose-perl-module {
+    # Each probe has its own interpreter so a failed require cannot leave
+    # partially initialized modules in the next probe.
+    "$SELECTED_PERL" - "$@" <<'PERL'
+use strict;
+use warnings;
+
+my ($module, $online) = @ARGV;
+(my $file = "$module.pm") =~ s{::}{/}g;
+my $loaded = eval { require $file; 1 };
+my $error = $@;
+my $version = do {
+    no strict 'refs';
+    ${$module . "::VERSION"};
+};
+my $version_label = defined $version ? "version $version" : 'version unknown';
+
+unless ($loaded) {
+    my $level = $module eq 'Crypt::OpenSSL::Guess' ? 'Warning' : 'Error';
+    if ($error =~ /\ACan't locate \Q$file\E in \@INC\b/) {
+        print "$level: $module: missing from the selected Perl.\n";
+        my %install_command = (
+            'Net::SSLeay'     => 'plenv ssl-doctor install-net-ssleay',
+            'IO::Socket::SSL' => 'plenv ssl-doctor install-io-socket-ssl',
+            'HTTP::Tiny'      => 'cpanm HTTP::Tiny',
+        );
+        print "  Install explicitly for the selected Perl: $install_command{$module}\n"
+            if exists $install_command{$module};
+    } else {
+        my $detail = 'module or dependency failed to initialize';
+        if ($error =~ /\ACan't locate ([\w\/]+\.pm) in \@INC\b/) {
+            $detail = "missing dependency $1";
+        } elsif ($error =~ /
+            Can't\ load\b | Can't\ locate\ loadable\ object\b |
+            loadable\ library\ and\ perl\ binaries\ are\ mismatched |
+            undefined\ symbol | symbol\ not\ found | Library\ not\ loaded
+        /ix) {
+            $detail = 'XS or shared library load failure';
+        }
+        print "$level: $module: broken ($version_label, $detail).\n";
+        print "  Inspect the load error with the selected Perl: perl -M$module -e 1\n";
+    }
+    exit 1;
+}
+
+print "$module: loadable ($version_label).\n";
+if ($module eq 'Net::SSLeay') {
+    my $runtime_version;
+    for my $api (qw(OpenSSL_version SSLeay_version)) {
+        my $get_version = Net::SSLeay->can($api) or next;
+        $runtime_version = eval { $get_version->(0) };
+        last if defined $runtime_version && length $runtime_version;
+    }
+    if (defined $runtime_version && length $runtime_version) {
+        print "Loaded OpenSSL (Net::SSLeay): $runtime_version\n";
+    } else {
+        print "Warning: loaded OpenSSL version unavailable from Net::SSLeay.\n";
+    }
+}
+exit 0 unless $module eq 'HTTP::Tiny';
+
+my $host = 'www.cpan.org';
+my $endpoint = "https://$host/";
+my $timeout = 10;
+my $http = eval {
+    HTTP::Tiny->new(
+        verify_SSL => 1,
+        SSL_options => {
+            SSL_verify_mode     => 0x01,
+            SSL_verifycn_scheme => 'http',
+            SSL_verifycn_name   => $host,
+        },
+        timeout => $timeout, max_redirect => 0,
+        proxy => undef, http_proxy => undef, https_proxy => undef,
+    );
+};
+unless ($http) {
+    print "Error: local HTTPS unavailable (could not configure HTTP::Tiny).\n";
+    exit 1;
+}
+my ($can_ssl, $reason) = eval { $http->can_ssl };
+unless ($can_ssl) {
+    my $hint = ($reason // '') =~ /CA bundle/i
+        ? 'Check the CA trust store for the selected Perl.'
+        : 'Check HTTP::Tiny, IO::Socket::SSL, and Net::SSLeay versions and the local CA trust store.';
+    print "Error: local HTTPS unavailable (HTTP::Tiny->can_ssl failed). $hint\n";
+    exit 1;
+}
+print "Local HTTPS (HTTP::Tiny->can_ssl): available.\n";
+exit 0 unless $online;
+
+print "Online HTTPS: HEAD $endpoint (certificate and hostname verification enabled).\n";
+my $response;
+my $timed_out;
+{
+    local $SIG{ALRM} = sub { $timed_out = 1; die "HTTPS probe timed out\n" };
+    alarm $timeout;
+    $response = eval { $http->head($endpoint) };
+    $error = $@;
+    alarm 0;
+}
+my $status = $response ? $response->{status} : undef;
+# HTTP::Tiny puts exception text in a synthetic 599 response. An actual
+# HEAD response has no body, even if its status and reason match.
+my $exception = ($status // 0) == 599
+    && ($response->{reason} // '') eq 'Internal Exception'
+    && length($response->{content} // '');
+if (!$timed_out && defined $status && $status =~ /\A[1-5][0-9]{2}\z/ && !$exception) {
+    print "Online HTTPS: HTTP response $status received.\n";
+    exit 0;
+}
+my $failure = $exception ? $response->{content} : $error;
+if ($timed_out || $failure =~ /(?:timed? out|timeout)/i) {
+    print "Error: online HTTPS DNS/network failure (timed out).\n";
+} elsif ($failure =~ /
+    certificate\ verif(?:y|ication)\ failed | certificate\ has\ expired |
+    self.signed\ certificate | unable\ to\ get\ (?:local\ )?issuer\ certificate |
+    hostname\ verification\ failed | hostname\ mismatch
+/ix) {
+    print "Error: online HTTPS certificate or hostname verification failed. Check the CA trust store and certificate chain.\n";
+} elsif ($failure =~ /
+    resolve\ (?:host|hostname) | name\ or\ service\ not\ known |
+    nodename\ nor\ servname | temporary\ failure\ in\ name\ resolution | getaddrinfo |
+    connection\ (?:refused|reset) | network\ is\ unreachable | no\ route\ to\ host
+/ix) {
+    print "Error: online HTTPS DNS/network failure. Check name resolution and connectivity.\n";
+} else {
+    print "Error: online HTTPS failed before receiving an HTTP response. Check network connectivity and TLS settings.\n";
+}
+exit 1;
+PERL
+}
+
+function check-ssl {
+    local online=$1 failed=0
+    printf 'plenv context: PLENV_VERSION=%s; perl command=%s\n' \
+        "${PLENV_VERSION:-<unset>}" "$(command -v perl)"
+    diagnose-perl-module Net::SSLeay 0 || failed=1
+    diagnose-perl-module IO::Socket::SSL 0 || failed=1
+    diagnose-openssl-builds || return $?
+    if [ "$failed" -ne 0 ] && [ "$online" -eq 1 ] ; then
+        echo 'Online HTTPS: skipped because a required TLS module failed to load.'
+        online=0
+    fi
+    diagnose-perl-module HTTP::Tiny "$online" || failed=1
+    return "$failed"
+}
+
 function main {
-    local arg='' target='' option_seen=''
+    local arg='' target='' option_seen='' online=0
     CLI_OPENSSL_PREFIX_SET=0
     # Options may precede or follow the command; exactly one value is consumed.
     # Empty overrides are errors, and repeated options use the last value.
@@ -414,6 +586,10 @@ function main {
                 target=$2 option_seen=$1
                 shift 2
                 ;;
+            --online)
+                online=1
+                shift
+                ;;
             --*) echo "Unknown option: $1" >&2; return 2 ;;
             *)
                 if [ -n "$arg" ] ; then
@@ -429,7 +605,15 @@ function main {
         echo "$option_seen is supported only with install-net-ssleay." >&2
         return 2
     fi
+    if [ "$online" -eq 1 ] && [ "$arg" != check ] ; then
+        echo '--online is supported only with check.' >&2
+        return 2
+    fi
     case "$arg" in
+        check)
+            select-perl || return $?
+            check-ssl "$online"
+            ;;
         install-net-ssleay)
             select-perl || return $?
             install-net-ssleay "$target"
@@ -444,6 +628,7 @@ function main {
             ;;
         ""|*)
             echo "Usage:"
+            echo '  plenv ssl-doctor check [--online]'
             echo '  plenv ssl-doctor install-net-ssleay [--openssl-prefix PATH] [--net-ssleay-version VERSION]'
             echo '  plenv ssl-doctor [install-io-socket-ssl|check-io-socket-ssl]'
             ;;
