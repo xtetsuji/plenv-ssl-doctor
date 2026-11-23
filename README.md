@@ -41,15 +41,20 @@ plenv which cpanm
 ## Commands and exit status
 
 ```text
-plenv ssl-doctor install-net-ssleay
+plenv ssl-doctor [--openssl-prefix PATH] install-net-ssleay [--openssl-prefix PATH]
 plenv ssl-doctor install-io-socket-ssl
 plenv ssl-doctor check-io-socket-ssl
 ```
 
-These are the implemented subcommands. There are no implemented command-line
-options; extra arguments to recognized commands are currently ignored.
-No argument or an unknown command prints usage and exits **0**, so usage output
-is not evidence that a diagnostic succeeded.
+The `--openssl-prefix PATH` option is accepted before or after
+`install-net-ssleay` only. If repeated, the last value wins. A missing or empty
+value, a value beginning with `--`, an unknown `--` option, an extra positional
+argument, or use of the option with another command exits **2**. The form
+`--openssl-prefix=PATH` is not supported. An empty `OPENSSL_PREFIX` is also an
+invalid explicit selection; a CLI value takes precedence over it.
+
+With no arguments or a single unknown command, usage is printed and the exit
+status is **0**, so usage output is not evidence that a diagnostic succeeded.
 
 To inspect a command's exit status, run `echo "$?"` immediately after it, before
 running another command.
@@ -85,32 +90,47 @@ An already usable module does not require cpanm.
 plenv ssl-doctor install-net-ssleay
 ```
 
-If Net::SSLeay loads, report the existing installation and exit **0**, without
-checking its version or reinstalling it. Otherwise the command:
+An explicit prefix is validated even when Net::SSLeay already loads. If it is
+valid and the module loads, the command reports the existing installation and
+exits **0** without checking its version or reinstalling it. Otherwise, when the
+module does not load, the command selects cpanm, selects an OpenSSL candidate,
+sets `OPENSSL_PREFIX` for the Net::SSLeay installer, and verifies that the
+selected Perl can load the installed module.
 
-1. Selects and validates cpanm as described above.
-2. Runs `cpanm Crypt::OpenSSL::Guess`.
-3. Calls `Crypt::OpenSSL::Guess::find_openssl_prefix()` and prints the result.
-4. Requires the resolved prefix to be an existing absolute directory without
-   newline or carriage-return characters.
-5. Sets `OPENSSL_PREFIX` to that result for the selected Perl running cpanm
-   with `Net::SSLeay`.
-6. Checks that the selected Perl can load Net::SSLeay before reporting success.
+Selection precedence is CLI `--openssl-prefix PATH`, then the environment
+variable `OPENSSL_PREFIX` (if set), then automatic discovery. An invalid
+explicit selection exits **2** without falling back. For example, after
+installing Homebrew's `openssl@3` development files and verifying the candidate
+as described below, either invocation selects it for a new build:
 
-The current command does not provide a reliable explicit OpenSSL selection
-interface: the plugin validates Guess's returned directory, but does not
-independently select or preserve a caller-supplied `OPENSSL_PREFIX`; the value
-passed to cpanm comes from Guess. Its behavior can depend on the installed
-Guess version and environment. Copy/paste
-override examples are deferred until
-[explicit selection is implemented (#3)](https://github.com/xtetsuji/plenv-ssl-doctor/issues/3).
+```sh
+plenv ssl-doctor install-net-ssleay --openssl-prefix "$(brew --prefix openssl@3)"
+OPENSSL_PREFIX="$(brew --prefix openssl@3)" plenv ssl-doctor install-net-ssleay
+```
+
+Automatic discovery considers Homebrew `openssl@3`, then Homebrew `openssl`,
+then the prefix returned by an already available `Crypt::OpenSSL::Guess`, in
+that order. Invalid automatic candidates are skipped. Paths are canonicalized
+and duplicate symlink targets are deduplicated; the first valid candidate wins.
+If none is valid and Guess is unavailable, the installation command installs
+Guess via cpanm and retries discovery. If Guess is already available but yields
+no valid candidate, the command fails instead of reinstalling it. A valid
+explicit or Homebrew candidate does not require installing Guess.
+
+Each candidate must be an existing absolute directory without newline, carriage
+return, or tab characters. Its executable `bin/openssl version` must succeed
+and output a recognized OpenSSL version, `include/openssl/ssl.h` must be
+readable, and both ssl and crypto libraries must be readable, nonempty files in
+`lib` or `lib64` (conventional static or shared library names are accepted).
+The selected canonical prefix, version, source, and selection reason are
+printed to stderr for an installation. Validation establishes availability,
+not compatibility with a particular Net::SSLeay release.
 
 Exit behavior and remaining limitations:
 
 - A missing module and a broken installed module both enter the installation
   path; the initial load error is suppressed.
-- Missing or rejected cpanm exits **1** before any installation.
-- A failed Guess query or an empty/invalid resolved prefix exits **1**.
+- Missing or rejected cpanm, or no valid automatic candidate, exits **1**.
 - An installer failure preserves its nonzero status and prints build-log hints.
 - After installer success, a missing or unloadable Net::SSLeay exits **1**, with
   the load error and build-log hints. Only a successful load produces the
@@ -166,9 +186,9 @@ a successful initial load also exits **1**. This command does **not** check the
 
 ## OpenSSL discovery and compatibility
 
-[Crypt::OpenSSL::Guess](https://github.com/akiym/Crypt-OpenSSL-Guess) discovers
-paths; finding a prefix does not prove that a Net::SSLeay release can compile
-against those headers and libraries. This plugin currently performs no
+Automatic discovery can use [Crypt::OpenSSL::Guess](https://github.com/akiym/Crypt-OpenSSL-Guess)
+as a fallback. Finding a prefix does not prove that a Net::SSLeay release can
+compile against those headers and libraries. This plugin currently performs no
 compatibility policy check.
 
 | Term | Meaning | How to inspect |
@@ -197,7 +217,10 @@ brew --prefix openssl@3
 "$(brew --prefix openssl@3)/bin/openssl" version
 ```
 
-This inspects a candidate; it does not select it for the plugin's installer.
+`brew --prefix` alone can print a path even when the formula is not installed;
+it is not installation evidence. The version command checks the executable,
+while the plugin also validates headers and libraries. These commands inspect a
+candidate; they do not select it for the installer.
 
 ## Troubleshooting
 
@@ -256,11 +279,11 @@ the exact release's notes and build results.
 For the reported 1.96/4.0.3 failure, a workaround is to rebuild against a
 maintained OpenSSL 3 version supported by that Net::SSLeay release, using the
 [upstream build instructions](https://github.com/radiator-software/p5-net-ssleay/blob/master/README)
-to control the build, then verify the module and runtime library. This is
-currently a manual operation outside this plugin's selection interface.
-Confirm the chosen prefix in the build log; simply rerunning this plugin may
-choose the same failing candidate. Do not remove a working installation merely
-because this command suggests uninstalling it.
+to control the build, then verify the module and runtime library. The explicit
+OpenSSL 3 selection examples above can select a prefix for a new installation;
+an already loadable Net::SSLeay is not automatically rebuilt. Confirm the chosen
+prefix in the build log. Do not remove a working installation merely because
+this command suggests uninstalling it.
 
 ## Contributing and offline tests
 
@@ -280,7 +303,8 @@ The test files use temporary module fixtures and fake executables, with
 isolated module lookup and executable paths. Tests do not access the network,
 install CPAN modules, run real builds, or change your Perl/OpenSSL installation.
 They cover IO::Socket::SSL missing/current/old/dotted versions and load errors,
-Perl/cpanm selection, Guess and installer failures, prefix validation,
+Perl/cpanm selection, explicit and automatic OpenSSL selection, Guess and
+installer failures, prefix validation and deduplication,
 post-install load checks, and test-helper isolation/output capture. They do
 not establish compatibility with real OpenSSL libraries or test every possible
 wrapper or platform.
@@ -306,10 +330,8 @@ for behavior changes; avoid modifying the developer's Perl or OpenSSL during
 tests. Include the command, exit status, selected interpreter/installer paths,
 exact versions, and relevant redacted errors in bug reports.
 
-Further documentation will accompany explicit OpenSSL selection (#3),
-compatibility diagnostics (#4), and general diagnostics (#5). Those features
-and their proposed examples are not available in this version; this README
-documents the current implementation.
+Compatibility diagnostics (#4) and general diagnostics (#5) are not yet
+implemented; this README documents the current implementation.
 
 ## Author
 
