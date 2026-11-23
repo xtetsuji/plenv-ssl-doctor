@@ -43,18 +43,20 @@ plenv which cpanm
 ```text
 plenv ssl-doctor install-net-ssleay [--openssl-prefix PATH] [--net-ssleay-version VERSION]
 plenv ssl-doctor install-io-socket-ssl
+plenv ssl-doctor check [--online]
 plenv ssl-doctor check-io-socket-ssl
 ```
 
-Both options are accepted before or after `install-net-ssleay` only. If either
-is repeated, its last value wins. `--net-ssleay-version VERSION` accepts an
+The two installer options are accepted before or after `install-net-ssleay`
+only. If either is repeated, its last value wins. `--net-ssleay-version VERSION` accepts an
 exact release in the form digits.digits, optionally followed by an underscore
 and digits (for example `1.96` or `1.97_01`); ranges and `=VERSION` syntax are
 not accepted. A missing or malformed version exits **2**.
 
 A missing or empty prefix value or a value beginning with `--` exits **2**.
 An unknown `--` option, an extra positional argument, or use of either option
-with another command also exits **2**. The form
+with another command also exits **2**. `--online` is accepted before or after
+`check` only; using it with another command exits **2**. The form
 `--openssl-prefix=PATH` is not supported. An empty `OPENSSL_PREFIX` is also an
 invalid explicit selection; a CLI value takes precedence over it.
 
@@ -216,6 +218,50 @@ Version checks use Perl's `VERSION` method, including for dotted versions.
 The internal missing-module status 2 selects installation; it is not the public
 status for a missing module after failed verification.
 
+### Diagnose the selected Perl
+
+```sh
+plenv ssl-doctor check
+plenv ssl-doctor check --online
+```
+
+By default, `check` is read-only and offline: it makes no HTTP requests, runs
+no cpanm or installer, and does not change the environment or installed modules.
+It reports the selected Perl path and version, the `perl` command path and
+`PLENV_VERSION` when set. This is context for the selected Perl, not a complete
+plenv configuration audit.
+
+The report checks loadability and versions of Net::SSLeay, IO::Socket::SSL,
+and HTTP::Tiny, distinguishing a missing module from one that is present but
+broken. It reports the OpenSSL library loaded by Net::SSLeay separately from
+available OpenSSL prefixes, versions, and sources for future builds. The latter
+use `OPENSSL_PREFIX` if set, otherwise automatic discovery; their compatibility
+is `UNKNOWN` because no future Net::SSLeay install target has been specified.
+It also checks local HTTPS capability using `HTTP::Tiny->can_ssl`.
+
+The selected Perl, the three modules, and local HTTPS capability are required.
+A missing or broken optional Guess helper, no automatically discovered build
+candidate, or unavailable runtime OpenSSL version metadata can produce a
+warning without making the check fail. An invalid explicitly set
+`OPENSSL_PREFIX`, including an empty value, is an error rather than a fallback.
+
+When local required checks pass, `--online` sends a HEAD request to
+`https://www.cpan.org/` with explicit certificate-chain and hostname
+verification, a 10-second timeout, no redirects, and no proxy settings. Any
+received HTTP response, including 4xx or 5xx, demonstrates TLS and HTTP
+connectivity; it does not establish endpoint health. Without a response, the
+probe classifies certificate/hostname or DNS/network failures where the
+available evidence permits, otherwise reporting a general connection failure.
+It does not print raw exceptions, request headers, or response contents, so
+proxy credentials in exception text are not exposed.
+
+- Exit **0**: required local checks passed and, if requested, an HTTP response
+  was received.
+- Exit **1**: a required local check or the requested online probe failed.
+- Exit **2**: invalid arguments or invalid explicit `OPENSSL_PREFIX`.
+
+See [diagnostics](docs/diagnostics.md) for report details and limitations.
+
 ### Check IO::Socket::SSL
 
 ```sh
@@ -349,9 +395,10 @@ install CPAN modules, run real builds, or change your Perl/OpenSSL installation.
 They cover IO::Socket::SSL missing/current/old/dotted versions and load errors,
 Perl/cpanm selection, explicit and automatic OpenSSL selection, Guess and
 installer failures, prefix validation and deduplication, compatibility ranking
-and version boundaries, post-install load and requested-version checks, and test-helper isolation/output capture. They do
-not establish compatibility with real OpenSSL libraries or test every possible
-wrapper or platform.
+and version boundaries, post-install load and requested-version checks, offline
+diagnostics and mocked online outcomes, and test-helper isolation/output capture.
+They do not establish compatibility with real OpenSSL libraries or test every
+possible wrapper or platform.
 
 Use the shared `t/lib/DoctorTest.pm` helper for new fixture-based tests; see its
 embedded usage documentation and `t/test-helper.t`. `DoctorTest->new` creates a
@@ -373,9 +420,6 @@ Keep user-facing messages and documentation in English. Add offline coverage
 for behavior changes; avoid modifying the developer's Perl or OpenSSL during
 tests. Include the command, exit status, selected interpreter/installer paths,
 exact versions, and relevant redacted errors in bug reports.
-
-General diagnostics (#5) are not yet implemented; this README documents the
-current implementation.
 
 ## Author
 
